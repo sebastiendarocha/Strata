@@ -1883,7 +1883,8 @@ I8Count& i8_count() {
 // places that write the identity (bind_stage_helper, run_impl, lm_run).  0: the size overflows (carve fails).
 size_t mmq_ids_rows(size_t T) {
     if (T > (size_t) INT64_MAX / (size_t) K) return 0;
-    return (size_t) mmq::mmq_ids_table_rows((uint64_t) (T * (size_t) K), (uint64_t) T);
+    const uint64_t rows = (uint64_t) (T * (size_t) K);
+    return (size_t) mmq::mmq_ids_table_rows(rows, rows);
 }
 struct MmqPlan {
     bool any = false, fallback = true;
