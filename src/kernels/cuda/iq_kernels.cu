@@ -3860,18 +3860,31 @@ __global__ void s26_swiglu_q8_1_kernel(const float* __restrict__ gate, const flo
     y[ib].qs[iqs] = q;
     if (iqs == 0) y[ib].ds = q8_1_ds(d, sum);   // #606: clamped scale/sum (the S26 path bypassed the finite helper)
 }
+// APR (prism.hadamard): a folded layer's down weights take the rotated h, so the SwiGLU and the q8_1 quantization are
+// two passes: the fused kernel cannot rotate between them.  The same three launches as the non-V2K path (line ~6650), so
+// the floats are the same ones.  had_block 0 (no fold): the fused kernel, as before.
+inline void s26_swiglu_q8_1_had(const NativeExpertLayout& L, const float* gate, const float* up, float* h, block_q8_1* hq,
+                                long long nh, cudaStream_t s, bool fused = true) {
+    if (L.had_block > 0) {
+        swiglu_entries_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(gate, up, h, nh);
+        hadamard_rows(h, h, nh / L.n_ff, L.n_ff, L.had_block, L.d_signs, s);
+        quantize_q8_1_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(h, hq, nh);
+    } else if (fused) {
+        s26_swiglu_q8_1_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(gate, up, h, hq, nh);
+    } else {
+        swiglu_entries_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(gate, up, h, nh);
+        quantize_q8_1_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(h, hq, nh);
+    }
+    check("swiglu/q8_1");
+}
+
 template<bool LT, bool LX, int RG, int RD, bool SL = false, bool FQ = false, bool TS = false, int BD = 0>
 void s26_launch_l(const NativeExpertLayout& L, int64_t cap_groups, cudaStream_t s, const unsigned long long* grp_ptr,
                   const int32_t* grp_start, const int32_t* n_groups, const int32_t* ent_dst, const int32_t* ent_tok,
                   const block_q8_1* X, float* gate, float* up, float* h, block_q8_1* hq, float* out, long long nh) {
     const dim3 ggu((unsigned) (2 * L.n_ff / (GU_ROWS * RG)), (unsigned) cap_groups);
     s26_gu_l_kernel<LT, LX, RG, SL, TS><<<ggu, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
-    if (FQ) {
-        s26_swiglu_q8_1_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(gate, up, h, hq, nh);
-    } else {
-        swiglu_entries_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(gate, up, h, nh);
-        quantize_q8_1_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(h, hq, nh);
-    }
+    s26_swiglu_q8_1_had(L, gate, up, h, hq, nh, s, FQ);
     const dim3 gd((unsigned) (L.n_embd / (8 * RD)), (unsigned) cap_groups);
     s26_down_l_kernel<LX, RD, SL, TS, BD><<<gd, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
 }
@@ -4061,7 +4074,7 @@ void s27_launch(const NativeExpertLayout& L, int64_t cap_groups, cudaStream_t s,
                 const block_q8_1* X, float* gate, float* up, float* h, block_q8_1* hq, float* out, long long nh) {
     const dim3 ggu((unsigned) (2 * L.n_ff / (GU_ROWS * RG)), (unsigned) cap_groups);
     s27_gu_kernel<TG, LX, RG, TS><<<ggu, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
-    s26_swiglu_q8_1_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(gate, up, h, hq, nh);
+    s26_swiglu_q8_1_had(L, gate, up, h, hq, nh, s);
     const dim3 gd((unsigned) (L.n_embd / (8 * RD)), (unsigned) cap_groups);
     s27_down_kernel<TD, LX, RD, TS><<<gd, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
 }
@@ -6501,7 +6514,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
             const dim3 ggu((unsigned) (2 * L.n_ff / (GU_ROWS * 4)), (unsigned) cap_groups);
             if (L.gu_type == 12) s27_gu_kernel<12, true, 4, false><<<ggu, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
             else s27_gu_kernel<13, true, 4, false><<<ggu, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
-            s26_swiglu_q8_1_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(gate, up, h, hq, nh);
+            s26_swiglu_q8_1_had(L, gate, up, h, hq, nh, s);
             const dim3 gd((unsigned) ((L.n_embd + 7) / 8), (unsigned) cap_groups);
             launch_down<13>(gd, s, grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
         }
