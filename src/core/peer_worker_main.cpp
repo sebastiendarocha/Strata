@@ -318,7 +318,7 @@ int main(int argc, char** argv) {
         strata::core::peer_store_rel(&z->tag, strata::core::kPeerTagRows);
     }
 
-    if (registered) cudaHostUnregister(base);
+    if (registered) (void) cudaHostUnregister(base);
     strata::core::peer_zone_unmap(base, bytes);
     return 0;
 }

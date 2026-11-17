@@ -326,7 +326,7 @@ void PeerProcess::close() {
     }
     if (map_ != nullptr) {
         if (registered_) {
-            cudaHostUnregister(map_);
+            (void) cudaHostUnregister(map_);
             registered_ = false;
         }
         peer_zone_unmap(map_, map_bytes_);
