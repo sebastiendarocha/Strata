@@ -72,6 +72,7 @@
 #include "strata/platform/home_cpus.hpp"
 #include "strata/platform/aux_cpus.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
+#include "strata/core/peer_channel.hpp"
 #include "strata/kernels/cpu/hadamard.hpp"
 #include "strata/kernels/ngram.hpp"
 #include "strata/kernels/iq_kernels.hpp"
@@ -899,6 +900,14 @@ struct Options {
     /// the prompt path's rows per layer the peer computes: -1 = half of chunk x top-k, 0 = the prompt path stays on
     /// the primary
     int64_t peer_prefill_rows = -1;
+    /// Cross-vendor peer channel: the device the PEER PROCESS uses on its side (-1 = the channel is off).
+    /// The peer is a separate binary built with the other vendor's runtime (docs/PEER_CHANNEL.md); the engine
+    /// spawns it with posix_spawnp and talks to it through a POSIX shared memory zone.
+    int peer_process = -1;
+    /// the peer binary ("" = STRATA_PEER_BINARY, else the "strata-peer" beside the engine)
+    std::string peer_process_binary;
+    /// the peer channel's self test: the engine's own launch path on a synthetic geometry (no model)
+    bool peer_process_selftest = false;
     /// The PLE gather's prefetch, as an A/B arm.  The gather measured 2.10-2.61 ms/token because its sixteen
     /// row reads are sixteen SEPARATE page faults into a 26.8 GB mapping; see `ple_prefetch_enable`.
     bool no_ple_prefetch = false;
@@ -1383,6 +1392,16 @@ void usage() {
                  "  --peer-adapt-swaps N  peer cache swaps per adaptation step (default: --adapt-swaps)\n"
                  "  --peer-prefill-rows N  prompt rows per layer the peer computes (default half of chunk x top-k;\n"
                  "                       0 = the prompt path stays on the primary)\n"
+                 "  --peer-process N     the cross-vendor peer PROCESS's device on its side (default: off).  The\n"
+                 "                       peer is a separate binary built with the OTHER vendor's runtime; the\n"
+                 "                       engine spawns it and talks to it through a shared memory zone\n"
+                 "                       (docs/PEER_CHANNEL.md).  The expert kernels come later: the peer\n"
+                 "                       answers the channel, it does not compute experts yet.\n"
+                 "  --peer-process-binary PATH  the peer binary (default: STRATA_PEER_BINARY, else the\n"
+                 "                       'strata-peer' beside the engine)\n"
+                 "  --peer-process-selftest  the peer channel's self test: the engine spawns the peer,\n"
+                 "                       publishes a plan and relectures the rows, on a synthetic\n"
+                 "                       geometry (no model is loaded, no expert is computed)\n"
                  "  --expert-cache-per-layer  R4.2g: give each layer its OWN slots instead of letting the first\n"
                  "                       position take all of them.  The default policy fills in arrival order\n"
                  "                       from one shared counter, so 256 slots went to ~26 layers of position 0\n"
@@ -3530,6 +3549,75 @@ static void exit_if_gpu_fatal(const std::string& err) {
     }
 }
 
+// The cross-vendor peer channel's probe: the engine's own launch path (the zone, the spawn, the
+// handshake, the plan publication and the relecture), on the given geometry.  No expert is computed:
+// the peer writes its test pattern, so the probe proves the TRANSPORT, not the kernels.
+static bool peer_channel_probe(int device, const std::string& binary, int64_t H, int64_t n_layers,
+                                int64_t n_expert, int64_t n_tok, int64_t k,
+                                const std::vector<strata::core::PeerLayerFmt>& fmts, std::string& err) {
+    strata::core::PeerProcess proc;
+    strata::core::PeerProcess::PeerView view;
+    view.device = device;
+    view.epoch = 1;
+    view.mode_eff = 0;
+    view.grid_groups = 0;
+    view.formats = fmts;
+    // the peer's own state: for the probe, the peer holds every expert, its gate is open and its
+    // epoch is 1 (the pack it opens gives the real values in the next tranche).
+    strata::core::PeerState state;
+    state.epoch = 1;
+    state.formats = fmts;
+    for (int64_t l = 0; l < n_layers; ++l) {
+        std::vector<int32_t> res;
+        for (int32_t e = 0; e < (int32_t) n_expert; ++e) res.push_back(e);
+        state.resident.push_back(res);
+        strata::core::PeerGateState gate{};
+        gate.landed = (int32_t) l;
+        gate.has = 0;
+        gate.pending = 0;
+        gate.last = (int32_t) l;
+        state.gates.push_back(gate);
+    }
+    if (!proc.open(H, n_tok, k, n_expert, n_layers, view, state, binary, {}, err)) return false;
+    std::fprintf(stderr, "strata generate: peer process %d (pid %d, zone %s, binary %s): the channel is up\n",
+                 device, proc.pid(), proc.zone_name().c_str(), proc.binary().c_str());
+    strata::core::PeerPlan probe;
+    probe.layer = 0;
+    probe.res_epoch_used = 1;
+    probe.ids.assign((size_t) (n_tok * k), 0);
+    probe.kind.assign((size_t) (n_tok * k), 2);
+    for (int64_t i = 0; i < n_tok * k; ++i) {
+        strata::core::PeerPlanEntry e{};
+        e.expert = 0;
+        e.token = (int32_t) (i / k);
+        e.out_row = (int32_t) i;
+        probe.entries.push_back(e);
+    }
+    if (!proc.publish(probe, err)) return false;
+    int32_t status = -1;
+    if (!proc.await_result(30000, status, err)) return false;
+    if (status != strata::core::kPeerStOk) {
+        err = std::string("the peer refused the probe: ") + strata::core::peer_status_name(status);
+        return false;
+    }
+    // the relecture: the peer's rows carry its pattern, so the primary can tell them from its own
+    int32_t checked = 0;
+    for (int64_t i = 0; i < n_tok * k; ++i) {
+        const float* r = proc.row((int32_t) i);
+        if (!r) { err = "the peer's rows are not readable"; return false; }
+        for (int32_t c = 0; c < H; ++c) {
+            if (r[c] != strata::core::peer_row_pattern((int32_t) i, c)) {
+                err = "the peer's row " + std::to_string(i) + " does not carry the pattern";
+                return false;
+            }
+        }
+        ++checked;
+    }
+    std::fprintf(stderr, "strata generate: peer process %d: the probe went through (%d rows relecture, %d written)\n",
+                 device, checked, proc.header()->n_rows_written);
+    return true;
+}
+
 #if defined(STRATA_USE_HIP) && defined(_WIN32)
 static int engine_main(int argc, char** argv) {   // main() is at the end of this file (#3431)
 #else
@@ -4007,6 +4095,9 @@ int main(int argc, char** argv) {
         else if (a == "--peer-slots") o.peer_slots = std::atoll(next("--peer-slots"));
         else if (a == "--peer-adapt-swaps") o.peer_adapt_swaps = std::atoi(next("--peer-adapt-swaps"));
         else if (a == "--peer-prefill-rows") o.peer_prefill_rows = std::atoll(next("--peer-prefill-rows"));
+        else if (a == "--peer-process") o.peer_process = std::atoi(next("--peer-process"));
+        else if (a == "--peer-process-binary") o.peer_process_binary = next("--peer-process-binary");
+        else if (a == "--peer-process-selftest") o.peer_process_selftest = true;
         else if (a == "--no-hit-poke") o.no_hit_poke = true;
         else if (a == "--expert-profile") o.expert_profile = next("--expert-profile");
         else if (a == "--expert-profile-save") o.expert_profile_save = next("--expert-profile-save");
@@ -4702,6 +4793,17 @@ int main(int argc, char** argv) {
         o.max_new = 1;
         have_tokens = true;
         o.stop_eos = true;
+    }
+    if (o.peer_process_selftest) {
+        // the peer channel's self test: the engine's own launch path (the zone, the spawn, the
+        // handshake, the plan publication and the relecture), on a synthetic geometry: no model is
+        // loaded and no expert is computed.  It runs before the pack is opened, so it needs no model.
+        std::string selftest_err;
+        if (!peer_channel_probe(o.peer_process, o.peer_process_binary, 64, 2, 8, 1, 2, {}, selftest_err)) {
+            std::fprintf(stderr, "strata generate: the peer channel: %s\n", selftest_err.c_str());
+            return 1;
+        }
+        return 0;
     }
     if (!have_tokens) {
         std::fprintf(stderr, "strata generate: --tokens is required (this build has no tokenizer; see the "
@@ -9522,6 +9624,37 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata generate: CUDA%d: %lld additional experts, %.2f GiB; "
                                  "results return through pinned host rows\n", remote_dev[r],
                          (long long) remote_experts[(size_t) r].resident(), remote_experts[(size_t) r].gib());
+        }
+    }
+
+    // ---- Cross-vendor peer channel: the engine spawns the peer PROCESS (the other vendor's runtime)
+    // The channel is the transport (docs/PEER_CHANNEL.md): the zone, the handshake, the plan
+    // publication and the peer's answer.  The expert kernels are the next tranche, so the probe below
+    // routes a synthetic window to prove the round trip in the real engine.
+    if (o.peer_process >= 0) {
+        const int64_t n_tok_probe = 1;
+        const int64_t k_probe = o.top_k > 0 ? o.top_k : 1;
+        // the primary's per-layer format: the expert layout's own (the peer compares it with its own)
+        const auto& lay_probe = strata::kernels::cpu::expert_layout();
+        std::vector<strata::core::PeerLayerFmt> fmts;
+        for (int64_t l = 0; l < g.n_layers; ++l) {
+            strata::core::PeerLayerFmt f{};
+            if (!lay_probe.fmt.empty() && (size_t) l < lay_probe.fmt.size()) {
+                const auto& nf = lay_probe.fmt[(size_t) l];
+                f.gu_type = nf.gu_type;
+                f.d_type = nf.d_type;
+                f.n_embd = (int32_t) nf.n_embd;
+                f.n_ff = (int32_t) nf.n_ff;
+                f.had_block = nf.had_block;
+                f.had_gu = nf.had_gu ? 1 : 0;
+                f.had_d = nf.had_d ? 1 : 0;
+            }
+            fmts.push_back(f);
+        }
+        if (!peer_channel_probe(o.peer_process, o.peer_process_binary, g.n_embd, g.n_layers, g.n_expert,
+                                n_tok_probe, k_probe, fmts, err)) {
+            std::fprintf(stderr, "strata generate: the peer channel: %s\n", err.c_str());
+            return 1;
         }
     }
 

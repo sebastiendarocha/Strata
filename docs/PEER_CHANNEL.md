@@ -148,6 +148,33 @@ Without `--peer-zone` it reads `STRATA_PEER_ZONE`. Without a usable device (no c
 the peer says so and keeps the zone in host memory: the transport still works, the card does not
 accelerate it.
 
+## The engine's own launch path
+
+The engine (`strata generate`) drives the channel through two options:
+
+```sh
+# the channel's self test: the engine spawns the peer, publishes a plan and relectures the rows,
+# on a synthetic geometry.  No model is loaded and no expert is computed.
+strata generate --peer-process-selftest --peer-process 0 \
+                --peer-process-binary /path/to/the/other/build/strata-peer
+
+# the channel inside a real run: the peer is spawned next to the model's first layer
+strata generate --pack pack/full --tokens "1,2,3" --peer-process 0
+```
+
+`--peer-process N` is the device the **peer** uses on its side (its visible index, in the peer's own
+runtime). `--peer-process-binary PATH` is the peer binary; without it the engine uses
+`STRATA_PEER_BINARY`, else the `strata-peer` beside the engine.
+
+The self test prints:
+
+```
+strata-peer: ready (zone /strata_peer_877481_691501563, 2 layers, 8 experts, device 0, registered)
+strata generate: peer process 0 (pid 877486, zone /strata_peer_877481_691501563, binary .../strata-peer): the channel is up
+strata-peer: 2 rows written (device mapping reachable)
+strata generate: peer process 0: the probe went through (2 rows relecture, 2 written)
+```
+
 ## The test
 
 ```sh
