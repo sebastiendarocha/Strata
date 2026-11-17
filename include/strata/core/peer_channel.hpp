@@ -47,6 +47,7 @@ enum : int32_t {
 
 /// The peer's refusal codes.  They mirror the upstream failure modes (the numbers are the
 /// prototype's, so a log line reads the same on both sides).
+///   kPeerStMode       the effective layout mode (or the grid_groups) cannot be the same on both cards
 ///   kPeerStFormat     the primary's per-layer format is not the peer's own
 ///   kPeerStEpoch      the residence epoch moved since the routing
 ///   kPeerStResidency  an expert planned for the peer is not resident on the peer
@@ -54,6 +55,7 @@ enum : int32_t {
 ///   kPeerStPlan       the plan is torn (its digest does not match)
 enum : int32_t {
     kPeerStOk = 0,
+    kPeerStMode = 1,
     kPeerStFormat = 2,
     kPeerStEpoch = 3,
     kPeerStResidency = 4,

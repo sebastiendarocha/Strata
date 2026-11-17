@@ -67,7 +67,7 @@ PeerProcess::PeerView good_view(int64_t n_layers, int32_t n_embd, int32_t n_ff) 
     v.device = 0;
     v.epoch = 1;
     v.mode_eff = 0;
-    v.grid_groups = 1;
+    v.grid_groups = 0;   // the peer's own default: a difference is a refusal (status 1)
     for (int64_t l = 0; l < n_layers; ++l) v.formats.push_back(fmt(n_embd, n_ff));
     return v;
 }
@@ -173,6 +173,27 @@ int main(int argc, char** argv) {
             check(status == kPeerStFormat, "refusal: the per-layer format differs (status 2)");
             check(peer.header()->n_rows_written == 0, "refusal: no row was written");
             check(rows_are_zero(peer, n_entries, H), "refusal: the output rows are untouched");
+            peer.close();
+        }
+    }
+
+    // (a2) the mode / grid_groups differ: the two cards must run the same layout (status 1)
+    {
+        PeerProcess peer;
+        std::string err;
+        const PeerState state = good_state(n_layers, n_expert, 64, 128);
+        PeerProcess::PeerView view = good_view(n_layers, 64, 128);
+        view.grid_groups = 8;   // the primary will use 8 groups, the peer uses 0
+        if (!peer.open(H, n_tok, k, n_expert, n_layers, view, state, binary, {}, err)) {
+            std::printf("  FAIL the channel did not open: %s\n", err.c_str());
+            ++g_failures;
+        } else {
+            PeerPlan plan = make_plan(n_tok, k, 2, 0, 1);
+            peer.publish(plan, err);
+            int32_t status = -1;
+            check(peer.await_result(30000, status, err), "the peer answered (mode case)");
+            check(status == kPeerStMode, "refusal: the effective mode differs (status 1)");
+            check(peer.header()->n_rows_written == 0, "refusal: no row was written");
             peer.close();
         }
     }

@@ -172,8 +172,9 @@ bool PeerProcess::open(int64_t H, int64_t n_tok, int64_t k, int64_t n_expert, in
     args.push_back(zone_);
     args.push_back("--peer-device");
     args.push_back(std::to_string(view.device));
-    args.push_back("--mode");
-    args.push_back(std::to_string(view.mode_eff));
+    // NOT --mode and NOT --grid-groups: the peer imposes its OWN mode (the operator configures the
+    // peer side, STRATA_PEER_MODE / STRATA_PEER_GRID_GROUPS), and the primary publishes what it will
+    // use in the header.  A difference is what the peer refuses (status 1).
     if (!view.model.empty()) {
         args.push_back("--pack");
         args.push_back(view.model);
@@ -261,7 +262,7 @@ bool PeerProcess::publish(const PeerPlan& plan, std::string& err, bool corrupt_d
     header_->plan_digest = corrupt_digest ? (int64_t) (d ^ 0x5a5a5a5a5a5a5a5aULL) : (int64_t) d;
 
     ++seq_;
-    header_->seq = seq_;
+    peer_store_rel(&header_->seq, seq_);
     header_->n_rows_written = 0;
     peer_store_rel(&header_->tag, kPeerTagPlan);
     return true;

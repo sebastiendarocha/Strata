@@ -109,6 +109,7 @@ The peer refuses (and writes nothing) when the plan does not match its own state
 
 | Status | Name | When |
 | --- | --- | --- |
+| `1` | mode | the effective layout mode (or the `grid_groups`) the primary published is not the one the peer imposes: the two cards must run the same layout |
 | `2` | format | the per-layer format the primary published is not the peer's own (a different `n_embd`, `n_ff`, ggml type, APR flags or signs digest) |
 | `3` | epoch | the residence epoch moved since the routing (a swap landed on the peer) |
 | `4` | residency | an expert the plan routes to the peer is not resident on the peer |
@@ -117,6 +118,11 @@ The peer refuses (and writes nothing) when the plan does not match its own state
 
 The status is read back by the primary (`await_result`). A refusal is a clean failure: the primary
 never sees a silent zero where it expected rows.
+
+The peer's **own** mode and `grid_groups` come from the peer side (`STRATA_PEER_MODE` and
+`STRATA_PEER_GRID_GROUPS` in the environment the peer inherits, or `--mode` / `--grid-groups` on its
+command line); the primary publishes what it will use in the header. A difference is the status 1
+refusal: the two cards must run the same layout.
 
 ## Running the peer by hand
 
@@ -155,7 +161,7 @@ The test needs **no model and no card**. It:
 - spawns the peer, waits for the handshake, checks the zone is established,
 - publishes a plan, waits for the answer and reads the rows back: each row `r` holds
   `777 + r * 1000 + c` in column `c`, so the primary can tell the peer's rows from its own,
-- triggers **five** refusals (format, epoch, residency, gate, digest) and checks each returned
+- triggers **six** refusals (mode, format, epoch, residency, gate, digest) and checks each returned
   status, and that **no row was written** in any of them.
 
 To run the test against the peer built with the *other* backend:

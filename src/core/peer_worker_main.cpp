@@ -53,7 +53,8 @@ void usage() {
                  "  --peer-zone NAME   the POSIX shared memory zone the primary created (required)\n"
                  "  --peer-device N    the device to use on this side (default 0)\n"
                  "  --pack FILE        the model file to open (the blobs never travel through the zone)\n"
-                 "  --mode N           the layout mode the primary imposes (default 0)\n"
+                 "  --mode N           the layout mode this peer imposes itself (default 0)\n"
+                 "  --grid-groups N    the grid_groups this peer passes (default 0)\n"
                  "The peer's own state comes from the STRATA_PEER_STATE environment variable.\n");
 }
 
@@ -63,6 +64,7 @@ int main(int argc, char** argv) {
     std::string zone;
     int device = 0;
     int mode = 0;
+    int64_t grid_groups = 0;
     std::string pack;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -77,6 +79,7 @@ int main(int argc, char** argv) {
         else if (a == "--peer-device") device = std::atoi(next("--peer-device").c_str());
         else if (a == "--pack") pack = next("--pack");
         else if (a == "--mode") mode = std::atoi(next("--mode").c_str());
+        else if (a == "--grid-groups") grid_groups = std::atoll(next("--grid-groups").c_str());
         else if (a == "--help" || a == "-h") { usage(); return 0; }
         else {
             std::fprintf(stderr, "strata-peer: unknown argument '%s'\n", a.c_str());
@@ -92,6 +95,12 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata-peer: no zone (--peer-zone or STRATA_PEER_ZONE)\n");
         return 2;
     }
+    // the peer's OWN mode and grid_groups: the peer is configured on ITS side (the operator sets
+    // these in the engine's environment, the peer inherits them), and the primary publishes what it
+    // will use.  A difference is a refusal (status 1): the two cards must run the same layout.
+    if (std::getenv("STRATA_PEER_MODE") != nullptr) mode = std::atoi(std::getenv("STRATA_PEER_MODE"));
+    if (std::getenv("STRATA_PEER_GRID_GROUPS") != nullptr)
+        grid_groups = std::atoll(std::getenv("STRATA_PEER_GRID_GROUPS"));
     if (zone[0] != '/') zone = "/" + zone;
 
     // the peer's own state: what it believes about itself (in the full engine it reads it from the
@@ -207,21 +216,31 @@ int main(int argc, char** argv) {
         int32_t refusal = strata::core::kPeerStOk;
         const char* why = "";
 
-        // (1) the format per layer: the primary's published layout against the peer's own
-        if (layer >= 0 && layer < (int64_t) state.formats.size()) {
-            const strata::core::PeerLayerFmt& mine = state.formats[layer];
-            const strata::core::PeerLayerFmt& theirs = fmts[layer];
+        // (1) the format per layer: the primary's published layout against the peer's own, for EVERY
+        //     layer (the prototype's check: a layer that differs makes the whole plan unusable)
+        for (int64_t l = 0; l < z->n_layers && refusal == strata::core::kPeerStOk; ++l) {
+            if (l >= (int64_t) state.formats.size()) continue;
+            const strata::core::PeerLayerFmt& mine = state.formats[l];
+            const strata::core::PeerLayerFmt& theirs = fmts[l];
             if (theirs.gu_type != mine.gu_type || theirs.d_type != mine.d_type ||
                 theirs.n_embd != mine.n_embd || theirs.n_ff != mine.n_ff) {
                 refusal = strata::core::kPeerStFormat;
                 why = "the per-layer format differs";
+            } else if (theirs.had_block != mine.had_block || theirs.had_gu != mine.had_gu ||
+                       theirs.had_d != mine.had_d || theirs.signs_digest != mine.signs_digest) {
+                refusal = strata::core::kPeerStFormat;
+                why = "the APR (Hadamard) layout differs";
             }
         }
-        // (2) the mode: the peer only accepts the mode it can impose (mode 0: no rebasing)
-        if (refusal == strata::core::kPeerStOk && z->mode_eff != 0) {
-            refusal = strata::core::kPeerStOk;   // the primary imposes its mode; the peer accepts 0 only
-            if (mode != 0 && z->mode_eff != mode) {
-                refusal = strata::core::kPeerStOk;
+        // (2) the mode: the peer only accepts a mode it can impose, and the published grid_groups
+        //     must be the one both sides pass (mode 0: no rebasing, no grid_groups branch)
+        if (refusal == strata::core::kPeerStOk) {
+            if (z->mode_eff != 0 && z->mode_eff != mode) {
+                refusal = strata::core::kPeerStMode;
+                why = "the published effective mode is not imposed on this card";
+            } else if (z->grid_groups != (int64_t) grid_groups) {
+                refusal = strata::core::kPeerStMode;
+                why = "the published grid_groups differs from the peer's own";
             }
         }
         // (3) the residence epoch: the plan was routed on a state the peer has left behind

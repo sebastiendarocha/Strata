@@ -31,6 +31,7 @@ inline int64_t alignup(int64_t v) { return (v + kAlign - 1) & ~(kAlign - 1); }
 const char* peer_status_name(int32_t status) {
     switch (status) {
         case kPeerStOk: return "ok";
+        case kPeerStMode: return "the effective layout mode cannot be imposed on this card";
         case kPeerStFormat: return "the per-layer format does not match the peer's own layout";
         case kPeerStEpoch: return "the residence epoch moved (a swap landed)";
         case kPeerStResidency: return "an expert planned for the peer is not resident";
