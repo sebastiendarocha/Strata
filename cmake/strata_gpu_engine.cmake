@@ -19,6 +19,41 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   # cudaEventQuery: the .cu sources get cudart through the CUDA language rules, a .cpp does not, and the
   # linker error ("unresolved external symbol cudaGraphInstantiate") names the function rather than the cause.
   target_link_libraries(strata_core PUBLIC strata_plan strata_warnings ${_strata_gpu_runtime_target})
+  # the cross-vendor peer channel's primary side (src/core/peer_process.cpp): the engine spawns the peer
+  target_link_libraries(strata_core PUBLIC strata_peer_host)
+
+  # ---- the cross-vendor peer channel (tranche 1: the transport) ----
+  # The peer is a SEPARATE binary and a SEPARATE build: CMakeLists.txt refuses CUDA and HIP in the
+  # same build, so the peer a CUDA primary spawns is the one the HIP tree built (and the other way
+  # round).  This target therefore builds the peer for THIS tree's backend: the HIP tree's
+  # "strata-peer" is the binary a CUDA engine launches (and the CUDA tree's is the one an AMD
+  # engine launches).  The source is written against the CUDA API; the HIP build's shim
+  # (include/strata/hip_compat/cuda_runtime.h) renames those calls to their HIP names, so the same
+  # source is both peers.
+  add_library(strata_peer_common STATIC src/core/peer_channel_common.cpp)
+  target_include_directories(strata_peer_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+  # the primary's side (the engine's): it creates the zone, spawns the peer and publishes the plans.
+  # strata_core links it, so the engine binary carries the transport.
+  add_library(strata_peer_host STATIC src/core/peer_process.cpp)
+  target_include_directories(strata_peer_host PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_link_libraries(strata_peer_host PUBLIC strata_peer_common ${_strata_gpu_runtime_target})
+
+  add_executable(strata-peer src/core/peer_worker_main.cpp)
+  target_include_directories(strata-peer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${_strata_gpu_include_directories})
+  target_link_libraries(strata-peer PRIVATE strata_peer_common ${_strata_gpu_runtime_target})
+
+  # the channel's own test: the primary spawns the peer, publishes a plan, reads the rows back and
+  # triggers the refusals.  It needs no model and no card (the registration is optional).
+  option(STRATA_PEER_CHANNEL_TESTS "Build the cross-vendor peer channel's test (it spawns a peer process)" ON)
+  if(STRATA_PEER_CHANNEL_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/peer_channel_test.cpp")
+    add_executable(peer_channel_test tests/core/peer_channel_test.cpp)
+    target_include_directories(peer_channel_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(peer_channel_test PRIVATE strata_peer_host ${_strata_gpu_runtime_target})
+    enable_testing()
+    add_test(NAME peer_channel_test COMMAND peer_channel_test $<TARGET_FILE:strata-peer>)
+    set_tests_properties(peer_channel_test PROPERTIES TIMEOUT 300)
+  endif()
 
   add_executable(strata-device src/core/device_main.cpp)
   target_link_libraries(strata-device PRIVATE strata_core)

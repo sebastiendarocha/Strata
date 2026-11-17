@@ -7,6 +7,10 @@ several cards. NVIDIA is described here; AMD limits and measurements are in [AMD
 > [Tuning options](#tuning-options) · [Pipeline windows](#pipeline-windows) · [Two models on two cards](#two-models-on-two-cards) ·
 > [Limits](#limits) · [History](#history--older-measurements)
 
+> **Two cards of different makes:** this page is about several cards of the same make. A card of the OTHER
+> vendor (an NVIDIA engine driving an AMD card) is reached through the cross-vendor peer channel, described
+> in [PEER_CHANNEL.md](PEER_CHANNEL.md).
+
 ## Using it
 
 **Desktop app:** choose Main, Helper or Off for each card. **Terminal:** run `strata launch` and use the Cards step, or name
